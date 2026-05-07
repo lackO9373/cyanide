@@ -44,4 +44,4 @@ Building some cool stuff utilizing kernel r/w exploit
 - Disable ASLR by setting `P_DISABLE_ASLR` to `launchd's proc->p_flag`
 
 ## Supported Devices
-All iOS/iPadOS 17.0-26.0.1 devices, except A19/M5 devices
+All iOS/iPadOS 17.0–18.7.1 and 26.0–26.0.1 devices, except A19/M5 devices
