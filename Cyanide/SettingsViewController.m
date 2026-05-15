@@ -16,6 +16,9 @@
 #import "TaskRop/RemoteCall.h"
 #import "kexploit/kutils.h"
 #import "installer/InstallProgressViewController.h"
+#import "installer/Package.h"
+#import "installer/PackageCatalog.h"
+#import "installer/PackageQueue.h"
 #import <WebKit/WebKit.h>
 #import <notify.h>
 #import <sys/utsname.h>
@@ -2167,7 +2170,7 @@ typedef NS_ENUM(NSInteger, RootSection) {
     }
     switch ((RootSection)section) {
         case RootSectionWarning:        return 1;
-        case RootSectionActions:        return 3;
+        case RootSectionActions:        return 4;
         case RootSectionTweakBundles:   return (NSInteger)self.tweakBundleRows.count;
         case RootSectionSystemBundles:  return (NSInteger)self.systemBundleRows.count;
         case RootSectionAbout:          return 2;
@@ -2296,7 +2299,7 @@ typedef NS_ENUM(NSInteger, RootSection) {
         cell.detailTextLabel.text = @"@zeroxjf";
     } else {
         cell.imageView.image = [SettingsViewController iconBadgeWithSymbol:@"square.and.arrow.up" color:UIColor.systemGreenColor size:29.0];
-        cell.textLabel.text = @"Submit Feedback";
+        cell.textLabel.text = @"Collect Log";
     }
     return cell;
 }
@@ -2391,8 +2394,16 @@ typedef NS_ENUM(NSInteger, RootSection) {
         BOOL cleanupEnabled = supported && (g_kexploit_done ||
                                             g_springboard_rc_ready ||
                                             remote_call_has_local_state());
+        BOOL anyInstalledOrQueued = NO;
+        for (Package *p in [PackageCatalog allPackages]) {
+            if (p.isInstalled) { anyInstalledOrQueued = YES; break; }
+        }
+        if (!anyInstalledOrQueued) {
+            anyInstalledOrQueued = [[PackageQueue sharedQueue] pendingCount] > 0;
+        }
         BOOL rowEnabled = supported;
         if (indexPath.row == 1) rowEnabled = cleanupEnabled;
+        if (indexPath.row == 3) rowEnabled = anyInstalledOrQueued;
 
         UILabel *primary = [[UILabel alloc] init];
         primary.translatesAutoresizingMaskIntoConstraints = NO;
@@ -2405,9 +2416,13 @@ typedef NS_ENUM(NSInteger, RootSection) {
             primary.text = @"Clean Up";
             primary.textColor = cleanupEnabled ? UIColor.systemRedColor : UIColor.tertiaryLabelColor;
             primary.font = [UIFont systemFontOfSize:17];
-        } else {
+        } else if (indexPath.row == 2) {
             primary.text = @"Respring";
             primary.textColor = supported ? UIColor.systemOrangeColor : UIColor.tertiaryLabelColor;
+            primary.font = [UIFont systemFontOfSize:17];
+        } else {
+            primary.text = @"Reset All Packages";
+            primary.textColor = anyInstalledOrQueued ? UIColor.systemRedColor : UIColor.tertiaryLabelColor;
             primary.font = [UIFont systemFontOfSize:17];
         }
         [cell.contentView addSubview:primary];
@@ -2433,6 +2448,11 @@ typedef NS_ENUM(NSInteger, RootSection) {
         } else if (indexPath.row == 2) {
             detailText = @"Clean up is auto run prior to respring to ensure a clean state.";
             detailColor = supported ? UIColor.secondaryLabelColor : UIColor.tertiaryLabelColor;
+        } else if (indexPath.row == 3) {
+            detailText = anyInstalledOrQueued
+                ? @"Uninstall every package and clear the pending queue. SpringBoard patches already applied this session stay until respring/reboot."
+                : @"Nothing installed or queued.";
+            detailColor = anyInstalledOrQueued ? UIColor.secondaryLabelColor : UIColor.tertiaryLabelColor;
         }
         if (detailText) {
             UILabel *detail = [[UILabel alloc] init];
@@ -2728,6 +2748,31 @@ typedef NS_ENUM(NSInteger, RootSection) {
                         settings_present_controller(nav, strongSelf);
                     });
                 });
+            }]];
+            settings_present_controller(ac, self);
+        } else if (indexPath.row == 3) {
+            UIAlertController *ac = [UIAlertController
+                alertControllerWithTitle:@"Reset All Packages?"
+                                 message:@"This uninstalls every package and clears the pending queue. The next chain run will start fresh from a clean slate. SpringBoard patches already live in this session stay until you respring or reboot.\n\nThis does not touch your Run options, Powercuff level, SBCustomizer grid, or other per-tweak settings — only install state."
+                          preferredStyle:UIAlertControllerStyleAlert];
+            [ac addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                                   style:UIAlertActionStyleCancel
+                                                 handler:nil]];
+            [ac addAction:[UIAlertAction actionWithTitle:@"Reset"
+                                                   style:UIAlertActionStyleDestructive
+                                                 handler:^(UIAlertAction *_) {
+                NSUInteger uninstalled = 0;
+                for (Package *p in [PackageCatalog allPackages]) {
+                    if (p.isInstalled) {
+                        [p uninstall];
+                        uninstalled++;
+                    }
+                }
+                NSInteger cleared = [[PackageQueue sharedQueue] pendingCount];
+                [[PackageQueue sharedQueue] clear];
+                log_user("[INSTALLER] Reset: uninstalled %lu package(s), cleared %ld queued change(s).\n",
+                         (unsigned long)uninstalled, (long)cleared);
+                [self.tableView reloadData];
             }]];
             settings_present_controller(ac, self);
         }

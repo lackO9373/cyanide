@@ -5,12 +5,14 @@
 
 #import "QueueReviewViewController.h"
 #import "PackageQueue.h"
+#import "PackageCatalog.h"
 #import "InstallProgressViewController.h"
 #import "../LogTextView.h"
 
 typedef NS_ENUM(NSInteger, QueueReviewSection) {
     QueueReviewSectionInstall = 0,
     QueueReviewSectionUninstall,
+    QueueReviewSectionReApply,   // packages already installed that will re-run on confirm
     QueueReviewSectionCount,
 };
 
@@ -150,10 +152,28 @@ typedef NS_ENUM(NSInteger, QueueReviewSection) {
     return QueueReviewSectionCount;
 }
 
+- (NSArray<Package *> *)reApplyPackages
+{
+    PackageQueue *q = [PackageQueue sharedQueue];
+    NSMutableArray<Package *> *out = [NSMutableArray array];
+    for (Package *p in [PackageCatalog allPackages]) {
+        if (!p.isInstalled) continue;
+        if ([q intentForPackage:p] == PackageQueueIntentUninstall) continue;
+        [out addObject:p];
+    }
+    return out;
+}
+
 - (NSArray<Package *> *)packagesForSection:(NSInteger)section
 {
     PackageQueue *q = [PackageQueue sharedQueue];
-    return (section == QueueReviewSectionInstall) ? q.queuedInstalls : q.queuedUninstalls;
+    switch ((QueueReviewSection)section) {
+        case QueueReviewSectionInstall:   return q.queuedInstalls;
+        case QueueReviewSectionUninstall: return q.queuedUninstalls;
+        case QueueReviewSectionReApply:   return [self reApplyPackages];
+        case QueueReviewSectionCount:     return @[];
+    }
+    return @[];
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section
@@ -165,8 +185,21 @@ typedef NS_ENUM(NSInteger, QueueReviewSection) {
 {
     NSArray<Package *> *list = [self packagesForSection:section];
     if (list.count == 0) return nil;
-    NSString *label = (section == QueueReviewSectionInstall) ? @"Install" : @"Uninstall";
+    NSString *label;
+    switch ((QueueReviewSection)section) {
+        case QueueReviewSectionInstall:   label = @"Install";          break;
+        case QueueReviewSectionUninstall: label = @"Uninstall";        break;
+        case QueueReviewSectionReApply:   label = @"Will Re-Apply";    break;
+        default:                          return nil;
+    }
     return [NSString stringWithFormat:@"%@  ·  %ld", label, (long)list.count];
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section
+{
+    if ((QueueReviewSection)section != QueueReviewSectionReApply) return nil;
+    if ([self reApplyPackages].count == 0) return nil;
+    return @"These are still installed from earlier sessions. Confirming the queue re-runs the chain, which re-applies every installed tweak (RemoteCall state doesn't survive a force-quit). To stop one from running, uninstall it from the Installer tab, or use Reset All Packages in Settings → Quick Actions.";
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath
@@ -178,15 +211,30 @@ typedef NS_ENUM(NSInteger, QueueReviewSection) {
     Package *pkg = [self packagesForSection:indexPath.section][indexPath.row];
     cell.textLabel.text = pkg.name;
     cell.textLabel.font = [UIFont systemFontOfSize:17.0 weight:UIFontWeightSemibold];
-    cell.detailTextLabel.text = (indexPath.section == QueueReviewSectionInstall)
-        ? @"Pending install"
-        : @"Pending removal";
+
+    QueueReviewSection s = (QueueReviewSection)indexPath.section;
+    switch (s) {
+        case QueueReviewSectionInstall:
+            cell.detailTextLabel.text = @"Pending install";
+            cell.detailTextLabel.textColor = UIColor.systemGreenColor;
+            break;
+        case QueueReviewSectionUninstall:
+            cell.detailTextLabel.text = @"Pending removal";
+            cell.detailTextLabel.textColor = UIColor.systemRedColor;
+            break;
+        case QueueReviewSectionReApply:
+            cell.detailTextLabel.text = @"Queued from prior install";
+            cell.detailTextLabel.textColor = UIColor.secondaryLabelColor;
+            break;
+        default:
+            cell.detailTextLabel.text = nil;
+            break;
+    }
     cell.detailTextLabel.font = [UIFont systemFontOfSize:12.0];
-    cell.detailTextLabel.textColor = (indexPath.section == QueueReviewSectionInstall)
-        ? UIColor.systemGreenColor
-        : UIColor.systemRedColor;
     cell.imageView.image = [UIImage systemImageNamed:pkg.symbolName];
-    cell.imageView.tintColor = self.view.tintColor;
+    cell.imageView.tintColor = (s == QueueReviewSectionReApply)
+        ? UIColor.tertiaryLabelColor
+        : self.view.tintColor;
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
     cell.accessoryView = nil;
     cell.accessoryType = UITableViewCellAccessoryNone;
@@ -196,6 +244,12 @@ typedef NS_ENUM(NSInteger, QueueReviewSection) {
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView
     trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath
 {
+    // Swipe-to-remove only applies to the pending queue rows. "Will Re-Apply"
+    // is informational — to drop one, the user uninstalls it from the
+    // Installer tab or runs Reset All Packages.
+    QueueReviewSection s = (QueueReviewSection)indexPath.section;
+    if (s != QueueReviewSectionInstall && s != QueueReviewSectionUninstall) return nil;
+
     Package *pkg = [self packagesForSection:indexPath.section][indexPath.row];
     UIContextualAction *remove = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
                                                                          title:@"Remove"
