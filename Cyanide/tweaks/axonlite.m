@@ -2142,14 +2142,21 @@ static bool axn_hydrate_pending_icons(AXNBundle *bundles, int bundleCount, uint6
         uint64_t image = 0;
         attempted++;
 
-        int reqIdx = axn_find_request_with_cell_for_bundle(bundle);
-        if (reqIdx >= 0) {
-            image = axn_extract_icon_from_cell(gAxonRequests[reqIdx].cell, source, sizeof(source));
-        }
-
-        if (!r_is_objc_ptr(image)) {
-            image = axn_app_icon_image(bundle);
-            if (r_is_objc_ptr(image)) snprintf(source, sizeof(source), "app-resolver");
+        // Prefer the authoritative app-resolver path. cell-ivar extraction
+        // pulls _prominentImageView.image off a recycled NCNotificationListCell;
+        // when SB has just reused a cell for a different bundle but the icon
+        // hasn't async-loaded yet, the cell still holds the PREVIOUS bundle's
+        // icon — which is why you see (e.g.) the ESPN icon appearing for WaPo.
+        // The app-resolver gives the canonical icon for the bundle.
+        int reqIdx = -1;
+        image = axn_app_icon_image(bundle);
+        if (r_is_objc_ptr(image)) {
+            snprintf(source, sizeof(source), "app-resolver");
+        } else {
+            reqIdx = axn_find_request_with_cell_for_bundle(bundle);
+            if (reqIdx >= 0) {
+                image = axn_extract_icon_from_cell(gAxonRequests[reqIdx].cell, source, sizeof(source));
+            }
         }
 
         if (r_is_objc_ptr(image)) {
@@ -2418,6 +2425,25 @@ static bool axn_ensure_window(uint64_t clvc)
         gAxonBadgeSignature[0] = '\0';
     }
 
+    // Defensive: if our app-side gAxonWindow pointer was reset (e.g. via
+    // axonlite_forget_remote_state during a session reconnect) but a
+    // previous container is STILL attached to the cover-sheet rootView,
+    // adding a new container would visually duplicate the icon strip.
+    // Sweep any orphaned containers by tag before allocating fresh.
+    int orphans = 0;
+    while (1) {
+        uint64_t stale = r_msg2_main(parentView, "viewWithTag:",
+                                     kAxonOverlayContainerTag, 0, 0, 0);
+        if (!r_is_objc_ptr(stale)) break;
+        r_msg2_main(stale, "setHidden:", 1, 0, 0, 0);
+        r_msg2_main(stale, "removeFromSuperview", 0, 0, 0, 0);
+        orphans++;
+        if (orphans >= 8) break;  // sanity cap
+    }
+    if (orphans > 0) {
+        printf("[AXONLITE] cleared %d orphaned overlay container(s) from parentView\n", orphans);
+    }
+
     // Position at the final cover-sheet spot immediately so the strip
     // doesn't flash in at (0,0) before axn_layout_window catches up.
     // Bundle count isn't known yet — use the cap (8) to size for max width;
@@ -2601,6 +2627,21 @@ static bool axn_update_overlay(uint64_t clvc, AXNBundle *bundles, int bundleCoun
         if (r_is_objc_ptr(gAxonControl)) {
             r_msg2_main(gAxonControl, "removeFromSuperview", 0, 0, 0, 0);
             gAxonControl = 0;
+        }
+        // Defensive sweep: if gAxonControl was cleared without a matching
+        // removeFromSuperview (state-forget path), an orphaned segmented
+        // control may still be in gAxonWindow. Find by tag and remove.
+        int stripOrphans = 0;
+        while (1) {
+            uint64_t stale = r_msg2_main(gAxonWindow, "viewWithTag:",
+                                         kAxonOverlayTag, 0, 0, 0);
+            if (!r_is_objc_ptr(stale)) break;
+            r_msg2_main(stale, "removeFromSuperview", 0, 0, 0, 0);
+            stripOrphans++;
+            if (stripOrphans >= 4) break;
+        }
+        if (stripOrphans > 0) {
+            printf("[AXONLITE] cleared %d orphaned strip(s) before rebuild\n", stripOrphans);
         }
         axn_clear_badges();
 
