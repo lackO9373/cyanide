@@ -12,5 +12,6 @@ bool axonlite_apply_in_session(void);
 bool axonlite_stop_in_session(void);
 void axonlite_forget_remote_state(void);
 bool axonlite_reset_selection_in_session(void);
+bool axonlite_initial_cache_ready(void);
 
 #endif /* axonlite_h */

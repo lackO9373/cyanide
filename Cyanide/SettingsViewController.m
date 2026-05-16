@@ -149,8 +149,8 @@ static const int64_t kLiveBackgroundTaskGraceSeconds = 10;
 static const useconds_t kRSSILiveIntervalUS = 1000000;
 static const useconds_t kRSSILiveBackgroundIntervalUS = 1000000;
 static const NSUInteger kRSSILiveMaxTicks = 43200;
-static const useconds_t kAxonLiteLiveIntervalUS = 15000000;
-static const useconds_t kAxonLiteLiveBackgroundIntervalUS = 60000000;
+static const useconds_t kAxonLiteLiveIntervalUS = 500000;
+static const useconds_t kAxonLiteLiveBackgroundIntervalUS = 1500000;
 static const NSUInteger kAxonLiteLiveMaxTicks = 43200;
 static NSString * const kSettingsRemoteCallStateDidChangeNotification = @"SettingsRemoteCallStateDidChangeNotification";
 NSString * const kSettingsActionsDidCompleteNotification = @"SettingsActionsDidCompleteNotification";
@@ -295,7 +295,7 @@ static BOOL settings_app_state_is_foreground(void)
 
 static NSUInteger settings_live_failure_limit(NSUInteger foregroundLimit)
 {
-    return (g_app_in_background != 0 || g_screen_awake == 0 || g_screen_locked != 0) ? 1 : foregroundLimit;
+    return (g_app_in_background != 0 || g_screen_awake == 0) ? 1 : foregroundLimit;
 }
 
 static BOOL settings_rssi_install_allowed(void)
@@ -385,15 +385,17 @@ static BOOL settings_refresh_screen_lock_state(const char *reason)
 
 static BOOL settings_axonlite_can_poll_springboard(void)
 {
+    // Locked-but-awake is the lockscreen — that's where Axon must run, so the
+    // lock state is intentionally not part of this predicate. Only pause while
+    // the screen is fully blanked, since SB tears down the cover-sheet VCs and
+    // our cached pointers would PAC-fault if we kept calling through them.
     (void)settings_refresh_screen_awake_state(NULL);
-    (void)settings_refresh_screen_lock_state(NULL);
-    return settings_screen_awake_cached() && !settings_screen_locked_cached();
+    return settings_screen_awake_cached();
 }
 
 static const char *settings_axonlite_pause_reason(void)
 {
     if (!settings_screen_awake_cached()) return "screen asleep";
-    if (settings_screen_locked_cached()) return "screen locked";
     return "screen unavailable";
 }
 
@@ -1506,8 +1508,12 @@ static void settings_start_axonlite_live_loop(void)
                 // While locked/asleep, CoverSheet churn is exactly where Axon
                 // can put sustained pressure on SB. Pause locally without
                 // messaging SB so the existing Axon roster/filter state is
-                // still there when the screen wakes.
-                if (!settings_axonlite_can_poll_springboard()) {
+                // still there when the screen wakes. The initial cache pass
+                // is exempt — interrupting it leaves SB with requests we've
+                // already removed but no segmented-control polling to bring
+                // them back.
+                if (!settings_axonlite_can_poll_springboard() &&
+                    axonlite_initial_cache_ready()) {
                     if (!pausedForUnavailableScreen) {
                         pausedForUnavailableScreen = YES;
                         printf("[SETTINGS] Axon Lite paused while %s\n",
@@ -1533,7 +1539,8 @@ static void settings_start_axonlite_live_loop(void)
                         failures++;
                         break;
                     }
-                    if (!settings_axonlite_can_poll_springboard()) {
+                    if (!settings_axonlite_can_poll_springboard() &&
+                        axonlite_initial_cache_ready()) {
                         printf("[SETTINGS] Axon Lite tick skipped inside lock: %s\n",
                                settings_axonlite_pause_reason());
                         nextTickUS = settings_now_us();

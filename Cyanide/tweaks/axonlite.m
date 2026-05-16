@@ -131,10 +131,13 @@ static int gAxonBundleRosterCount = 0;
 static uint64_t gAxonTick = 0;
 static uint64_t gAxonCLVC = 0;
 static uint64_t gAxonCombined = 0;
+static uint64_t gAxonCoverSheetWindow = 0;
 static uint64_t gAxonWindow = 0;
 static uint64_t gAxonHostView = 0;
 static uint64_t gAxonControl = 0;
 static uint64_t gAxonBadgeView = 0;
+static uint64_t gAxonSpinner = 0;
+static int gAxonSpinnerHoldTicks = 0;
 static uint64_t gAxonModelOwnerCLVC = 0;
 static uint64_t gAxonListModel = 0;
 static uint64_t gAxonListCache = 0;
@@ -453,11 +456,44 @@ static bool gAxonClvcCanInsert = false;
 static bool gAxonClvcCanToggleFilter = false;
 static bool gAxonClvcCanReveal = false;
 static bool gAxonClvcCanListView = false;
+static bool gAxonModelProbed = false;
+static uint64_t gAxonModelProbedPtr = 0;
+static bool gAxonModelCanToggleFilter = false;
+static bool gAxonModelCanPrivateInsert = false;
+static bool gAxonModelCanNotifyContentChange = false;
 static bool gAxonCombinedProbedOnce = false;
 static bool gAxonCombinedCanForceReveal = false;
 static bool gAxonCombinedCanOverrideStyle = false;
 static uint64_t gAxonDisplayStyleAssertion = 0;
 static bool gAxonListInsetApplied = false;
+
+static void axn_probe_list_model(uint64_t model)
+{
+    if (!r_is_objc_ptr(model)) {
+        gAxonModelProbed = false;
+        gAxonModelProbedPtr = 0;
+        gAxonModelCanToggleFilter = false;
+        gAxonModelCanPrivateInsert = false;
+        gAxonModelCanNotifyContentChange = false;
+        return;
+    }
+    if (gAxonModelProbed && gAxonModelProbedPtr == model) return;
+
+    gAxonModelProbed = true;
+    gAxonModelProbedPtr = model;
+    gAxonModelCanToggleFilter = r_responds_main(model,
+        "toggleFilteringForSectionIdentifier:shouldFilter:");
+    gAxonModelCanPrivateInsert = r_responds_main(model, "_insertNotificationRequest:");
+    gAxonModelCanNotifyContentChange = r_responds_main(model, "_notificationListDidChangeContent");
+
+    char cls[96];
+    axn_object_class_name(model, cls, sizeof(cls));
+    printf("[AXONLITE] probe listModel=0x%llx class=%s toggleFilter=%d privateInsert=%d notifyChange=%d\n",
+           (unsigned long long)model, cls,
+           gAxonModelCanToggleFilter,
+           gAxonModelCanPrivateInsert,
+           gAxonModelCanNotifyContentChange);
+}
 
 static void axn_probe_controller_methods(uint64_t clvc, uint64_t combined)
 {
@@ -863,6 +899,7 @@ static uint64_t axn_find_notification_list_controller(void)
     }
     gAxonCLVC = 0;
     gAxonCombined = 0;
+    gAxonCoverSheetWindow = 0;
 
     uint64_t UIApplication = r_class("UIApplication");
     uint64_t app = r_is_objc_ptr(UIApplication) ? axn_msg0_main_cached(UIApplication, AXNSelSharedApplication, "sharedApplication") : 0;
@@ -912,8 +949,10 @@ static uint64_t axn_find_notification_list_controller(void)
                 gAxonCellsForRequests = 0;
             }
             gAxonCLVC = hit;
-            printf("[AXONLITE] targeted hit clvc=0x%llx visited=%d window=%llu\n",
-                   hit, visited, (unsigned long long)i);
+            gAxonCoverSheetWindow = win;
+            printf("[AXONLITE] targeted hit clvc=0x%llx visited=%d window=%llu winPtr=0x%llx\n",
+                   hit, visited, (unsigned long long)i,
+                   (unsigned long long)win);
             return hit;
         }
     }
@@ -954,6 +993,11 @@ static void axn_reset_model_cache_for_clvc(uint64_t clvc)
     gAxonListModel = 0;
     gAxonListCache = 0;
     gAxonCellsForRequests = 0;
+    gAxonModelProbed = false;
+    gAxonModelProbedPtr = 0;
+    gAxonModelCanToggleFilter = false;
+    gAxonModelCanPrivateInsert = false;
+    gAxonModelCanNotifyContentChange = false;
 }
 
 static uint64_t axn_list_model_for_clvc(uint64_t clvc)
@@ -977,6 +1021,7 @@ static uint64_t axn_list_model_for_clvc(uint64_t clvc)
         gAxonModelFallbackLogBudget--;
     }
     gAxonListModel = r_is_objc_ptr(model) ? model : 0;
+    axn_probe_list_model(gAxonListModel);
     return gAxonListModel;
 }
 
@@ -2308,6 +2353,14 @@ static void axn_cleanup_legacy_window(void)
     }
 }
 
+// Overlay is now a direct subview of the cover sheet's UIWindow. Earlier
+// architectures: subview of CLVC.view ate taps (scroll view's pan
+// recognizer); standalone UIWindow at level 1900 worked for taps but
+// stayed on top everywhere. The cover sheet window already comes forward
+// when the cover sheet is presented (lockscreen + notification center)
+// and recedes when dismissed, so our overlay's visibility tracks that
+// naturally. Adding above CLVC.view (not inside it) avoids the scroll-
+// view pan-gesture conflict.
 static bool axn_ensure_window(uint64_t clvc)
 {
     axn_cleanup_legacy_window();
@@ -2318,54 +2371,95 @@ static bool axn_ensure_window(uint64_t clvc)
         return false;
     }
 
-    if (r_is_objc_ptr(gAxonWindow) && gAxonHostView == host) {
+    uint64_t hostWindow = axn_try_msg0_main(host, "window");
+    if (!r_is_objc_ptr(hostWindow) && r_is_objc_ptr(gAxonCoverSheetWindow)) {
+        // CLVC view isn't mounted in a window yet (cover sheet hasn't been
+        // presented this session). The cover sheet's UIWindow itself still
+        // exists — we cached it during the targeted scan. Use it directly so
+        // we can attach the overlay before the user pulls down the cover sheet.
+        hostWindow = gAxonCoverSheetWindow;
+    }
+    if (!r_is_objc_ptr(hostWindow)) {
+        printf("[AXONLITE] host=0x%llx has no parent window\n", host);
+        return false;
+    }
+
+    // Attach into the cover sheet's rootViewController.view rather than the
+    // window itself: that view slides via transform when the cover sheet
+    // dismisses, so our overlay naturally tracks the lock-screen <-> home-
+    // screen transition. Window-level attachment kept the overlay onscreen
+    // after dismiss because UIWindow doesn't move during the cover sheet
+    // slide animation.
+    uint64_t coverSheetVC = axn_try_msg0_main(hostWindow, "rootViewController");
+    uint64_t parentView = r_is_objc_ptr(coverSheetVC) ?
+                          axn_try_msg0_main(coverSheetVC, "view") : 0;
+    if (!r_is_objc_ptr(parentView)) {
+        printf("[AXONLITE] cover sheet rootViewController view unavailable\n");
+        return false;
+    }
+
+    if (r_is_objc_ptr(gAxonWindow) && gAxonHostView == parentView) {
         r_msg2_main(gAxonWindow, "setHidden:", 0, 0, 0, 0);
-        r_msg2_main(host, "bringSubviewToFront:", gAxonWindow, 0, 0, 0);
+        r_msg2_main(parentView, "bringSubviewToFront:", gAxonWindow, 0, 0, 0);
         return true;
     }
 
     if (r_is_objc_ptr(gAxonWindow)) {
+        r_msg2_main(gAxonWindow, "setHidden:", 1, 0, 0, 0);
         r_msg2_main(gAxonWindow, "removeFromSuperview", 0, 0, 0, 0);
+        axn_release_remote_obj(gAxonWindow);
         gAxonWindow = 0;
         gAxonControl = 0;
         gAxonControlCanSelect = false;
         gAxonBadgeView = 0;
+        gAxonSpinner = 0;
+        gAxonSpinnerHoldTicks = 0;
         gAxonSegmentSignature[0] = '\0';
         gAxonBadgeSignature[0] = '\0';
     }
 
-    bool created = false;
-    uint64_t container = r_msg2_main(host, "viewWithTag:", kAxonOverlayContainerTag, 0, 0, 0);
+    // Position at the final cover-sheet spot immediately so the strip
+    // doesn't flash in at (0,0) before axn_layout_window catches up.
+    // Bundle count isn't known yet — use the cap (8) to size for max width;
+    // axn_layout_window adjusts down when the real count arrives.
+    double initialWidth = axn_overlay_width_for_count(kAxonMaxBundles);
+    double initialScreenWidth = axn_screen_width();
+    double initialScreenHeight = axn_screen_height();
+    double initialX = fmax(kAxonOverlayMargin, (initialScreenWidth - initialWidth) / 2.0);
+    double initialY = fmax(kAxonOverlayTopInsetMin, initialScreenHeight * kAxonOverlayTopInsetFraction);
+
+    uint64_t container = axn_alloc_init_view("UIView", initialX, initialY, initialWidth, kAxonOverlayHeight);
     if (!r_is_objc_ptr(container)) {
-        container = axn_alloc_init_view("UIView", 0.0, 0.0, 116.0, kAxonOverlayHeight);
-        if (!r_is_objc_ptr(container)) {
-            printf("[AXONLITE] overlay view allocation failed\n");
-            return false;
-        }
-        r_msg2_main(container, "setTag:", kAxonOverlayContainerTag, 0, 0, 0);
-        r_msg2_main(container, "setUserInteractionEnabled:", 1, 0, 0, 0);
-        r_msg2_main(container, "setClipsToBounds:", 0, 0, 0, 0);
-
-        uint64_t UIColor = r_class("UIColor");
-        uint64_t clear = r_is_objc_ptr(UIColor) ? r_msg2_main(UIColor, "clearColor", 0, 0, 0, 0) : 0;
-        if (r_is_objc_ptr(clear)) r_msg2_main(container, "setBackgroundColor:", clear, 0, 0, 0);
-
-        r_msg2_main(host, "addSubview:", container, 0, 0, 0);
-        axn_release_remote_obj(container);
-        created = true;
-    } else {
-        r_msg2_main(container, "setHidden:", 0, 0, 0, 0);
-        r_msg2_main(container, "setUserInteractionEnabled:", 1, 0, 0, 0);
+        printf("[AXONLITE] overlay view allocation failed\n");
+        return false;
     }
+    r_msg2_main(container, "setTag:", kAxonOverlayContainerTag, 0, 0, 0);
+    r_msg2_main(container, "setUserInteractionEnabled:", 1, 0, 0, 0);
+    r_msg2_main(container, "setClipsToBounds:", 0, 0, 0, 0);
 
-    r_msg2_main(host, "bringSubviewToFront:", container, 0, 0, 0);
+    uint64_t UIColor = r_class("UIColor");
+    uint64_t clear = r_is_objc_ptr(UIColor) ? r_msg2_main(UIColor, "clearColor", 0, 0, 0, 0) : 0;
+    if (r_is_objc_ptr(clear)) r_msg2_main(container, "setBackgroundColor:", clear, 0, 0, 0);
+
+    // Retain explicitly so we own a +1 reference; addSubview takes its own
+    // retain. We hold gAxonWindow as our reference for the entire lifetime.
+    r_msg2_main(container, "retain", 0, 0, 0, 0);
+    r_msg2_main(parentView, "addSubview:", container, 0, 0, 0);
+    r_msg2_main(parentView, "bringSubviewToFront:", container, 0, 0, 0);
+    // Drop the +1 from alloc/init now that parentView has its own.
+    axn_release_remote_obj(container);
+
     gAxonWindow = container;
-    gAxonHostView = host;
-    gAxonControl = r_msg2_main(container, "viewWithTag:", kAxonOverlayTag, 0, 0, 0);
-    gAxonBadgeView = r_msg2_main(container, "viewWithTag:", kAxonOverlayBadgeTag, 0, 0, 0);
-    if (created) {
-        printf("[AXONLITE] overlay view=0x%llx host=0x%llx\n", container, host);
-    }
+    gAxonHostView = parentView;
+    gAxonControl = 0;
+    gAxonBadgeView = 0;
+    gAxonSpinner = 0;
+    gAxonSpinnerHoldTicks = 0;
+
+    printf("[AXONLITE] overlay container=0x%llx parentView=0x%llx hostWindow=0x%llx (subview of cover sheet rootView)\n",
+           (unsigned long long)container,
+           (unsigned long long)parentView,
+           (unsigned long long)hostWindow);
     return true;
 }
 
@@ -2386,6 +2480,62 @@ static void axn_layout_window(int bundleCount)
     }
     if (r_is_objc_ptr(gAxonBadgeView)) {
         axn_send_rect_main(gAxonBadgeView, "setFrame:", 0.0, 0.0, width, kAxonOverlayHeight);
+    }
+    if (r_is_objc_ptr(gAxonSpinner)) {
+        // Hover over the first segment ("All"). Slightly smaller than the
+        // segment so the All title/icon remains readable when the spinner
+        // is hidden (hidesWhenStopped=YES). userInteractionEnabled=NO on the
+        // spinner means the segment under it stays tappable.
+        const double size = 28.0;
+        double segmentWidth = width / (double)(bundleCount + 1);
+        if (!isfinite(segmentWidth) || segmentWidth < 1.0) segmentWidth = width;
+        axn_send_rect_main(gAxonSpinner, "setFrame:",
+                           (segmentWidth - size) / 2.0,
+                           (kAxonOverlayHeight - size) / 2.0,
+                           size, size);
+    }
+}
+
+static void axn_ensure_spinner(void)
+{
+    if (!r_is_objc_ptr(gAxonWindow)) return;
+    if (r_is_objc_ptr(gAxonSpinner)) return;
+
+    uint64_t cls = r_class("UIActivityIndicatorView");
+    if (!r_is_objc_ptr(cls)) return;
+    uint64_t alloc = r_msg2_main(cls, "alloc", 0, 0, 0, 0);
+    if (!r_is_objc_ptr(alloc)) return;
+    // UIActivityIndicatorViewStyleLarge = 101 (37x37 intrinsic; small enough
+    // to fit in a ~45px-wide segment over the "All" button).
+    uint64_t spin = r_msg2_main(alloc, "initWithActivityIndicatorStyle:", 101, 0, 0, 0);
+    if (!r_is_objc_ptr(spin)) return;
+
+    r_msg2_main(spin, "setHidesWhenStopped:", 1, 0, 0, 0);
+    r_msg2_main(spin, "setUserInteractionEnabled:", 0, 0, 0, 0);
+    uint64_t UIColor = r_class("UIColor");
+    uint64_t white = r_is_objc_ptr(UIColor) ?
+                     r_msg2_main(UIColor, "whiteColor", 0, 0, 0, 0) : 0;
+    if (r_is_objc_ptr(white)) r_msg2_main(spin, "setColor:", white, 0, 0, 0);
+
+    r_msg2_main(gAxonWindow, "addSubview:", spin, 0, 0, 0);
+    r_msg2_main(gAxonWindow, "bringSubviewToFront:", spin, 0, 0, 0);
+    gAxonSpinner = spin;
+
+    // Start spinning the moment the overlay is created so the user sees
+    // activity during initial cache build. Stops via the standard hold-
+    // counter decrement after ~3 ticks (~2 s) once setup has settled.
+    r_msg2_main(spin, "startAnimating", 0, 0, 0, 0);
+    gAxonSpinnerHoldTicks = 3;
+}
+
+static void axn_show_spinner(bool show)
+{
+    if (!r_is_objc_ptr(gAxonSpinner)) return;
+    if (show) {
+        r_msg2_main(gAxonWindow, "bringSubviewToFront:", gAxonSpinner, 0, 0, 0);
+        r_msg2_main(gAxonSpinner, "startAnimating", 0, 0, 0, 0);
+    } else {
+        r_msg2_main(gAxonSpinner, "stopAnimating", 0, 0, 0, 0);
     }
 }
 
@@ -2419,6 +2569,7 @@ static bool axn_badge_signature(AXNBundle *bundles, int bundleCount, char *out, 
 static bool axn_update_overlay(uint64_t clvc, AXNBundle *bundles, int bundleCount)
 {
     if (!axn_ensure_window(clvc)) return false;
+    axn_ensure_spinner();
 
     if (bundleCount > kAxonMaxBundles) bundleCount = kAxonMaxBundles;
     if (bundleCount <= 0 &&
@@ -2477,6 +2628,17 @@ static bool axn_update_overlay(uint64_t clvc, AXNBundle *bundles, int bundleCoun
         }
 
         printf("[AXONLITE] icon strip rebuilt bundles=%d\n", bundleCount);
+        for (int i = 0; i < bundleCount; i++) {
+            uint64_t icon = axn_lookup_cached_icon(bundles[i].bundle);
+            printf("[AXONLITE] strip[%d] bundle=%s count=%d icon=0x%llx\n",
+                   i + 1, bundles[i].bundle, bundles[i].count,
+                   (unsigned long long)icon);
+        }
+        // Strip was just added, so it's now the topmost subview. Put the
+        // spinner back on top so it's visible while it's animating.
+        if (r_is_objc_ptr(gAxonSpinner)) {
+            r_msg2_main(gAxonWindow, "bringSubviewToFront:", gAxonSpinner, 0, 0, 0);
+        }
     } else if (strcmp(badgeSignature, gAxonBadgeSignature) != 0) {
         axn_rebuild_badges(bundles, bundleCount);
         snprintf(gAxonBadgeSignature, sizeof(gAxonBadgeSignature), "%s", badgeSignature);
@@ -2760,94 +2922,144 @@ static void axn_filtered_remove(const char *bundle)
     memset(gAxonFilteredBundles[gAxonFilteredCount], 0, 128);
 }
 
-// Mirror of upstream Axon's hideAllNotificationRequests +
-// showNotificationRequestsForBundleIdentifier:. Iterates our retained
-// requests; for each non-matching request that's still visible, calls
-// clvc.removeNotificationRequest:. For each previously-removed request
-// that should be visible again, calls clvc.insertNotificationRequest:.
-// iOS 18 dropped the forCoalescedNotification: arg from these selectors.
+// Drive section-level filtering via
+// toggleFilteringForSectionIdentifier:shouldFilter:. This is the only
+// reversible primitive stock SB exposes on
+// NCNotificationStructuredListViewController — removeNotificationRequest:
+// works one-way but insertNotificationRequest: no-ops on a previously-
+// removed request, so the old remove/insert path could hide but never
+// restore. Section identifier is taken to be the bundle ID
+// (axn_section_id_for_bundle wraps it as an NSString).
+// Per-request hide/restore. Hide uses removeNotificationRequest: on the
+// controller — empirically the only primitive that visually removes cells
+// on iOS 18's NCNotificationRootModernList listView. Restore tries
+// _insertNotificationRequest: directly on the listModel (the underscore
+// method is the ObjC workhorse that the Swift insert(_:) wraps with a
+// strict update-tracking check that rejects previously-removed requests).
+// If the private insert isn't available, restore degrades to no-op until
+// the user re-runs the chain.
 static void axn_apply_filter(uint64_t clvc, uint64_t tick)
 {
     if (!r_is_objc_ptr(clvc)) return;
-    if (!gAxonClvcCanRemove || !gAxonClvcCanInsert) return;
+    if (!gAxonClvcCanRemove) return;
 
     uint32_t axonOldSettle = r_settle_us(1000);
 
+    // Re-poll segmented control RIGHT NOW: if the user tapped during this
+    // tick (after the start-of-tick poll), this catches it and lets the
+    // filter fire in the same tick instead of waiting for the next one.
+    axn_update_selected_from_control();
+
     bool filterEnabled = gAxonSelectedBundle[0] != '\0';
     bool selectionChanged = strcmp(gAxonSelectedBundle, gAxonLastAppliedFilter) != 0;
+    uint64_t model = r_is_objc_ptr(gAxonListModel) ? gAxonListModel : 0;
+    bool canRestore = r_is_objc_ptr(model) && gAxonModelCanPrivateInsert;
 
     if (selectionChanged) {
-        printf("[AXONLITE] filter begin tick=%llu desired=%s prev=%s tracked=%d\n",
+        printf("[AXONLITE] filter begin tick=%llu desired=%s prev=%s tracked=%d restoreVia=%s\n",
                (unsigned long long)tick,
                gAxonSelectedBundle[0] ? gAxonSelectedBundle : "All",
                gAxonLastAppliedFilter[0] ? gAxonLastAppliedFilter : "All",
-               gAxonRequestCount);
+               gAxonRequestCount,
+               canRestore ? "model._insert" : "none");
+        axn_show_spinner(true);
+        gAxonSpinnerHoldTicks = 2;
     }
 
-    // Count pending work first so we can pick sync vs async. Async (fire-and-
-    // forget) is ~3x faster per call but saturates the Mach port table when
-    // bursted; 76-op bursts panicked the kernel previously. Switch passes
-    // are typically <=25 ops so they're safe to async. The initial drain
-    // (~100+ ops on boot) stays sync.
-    int pendingOps = 0;
-    for (int i = 0; i < gAxonRequestCount; i++) {
-        AXNRequestEntry *e = &gAxonRequests[i];
-        if (!r_is_objc_ptr(e->request) || !e->bundle[0]) continue;
-        bool wantsVisible = filterEnabled &&
-                            strcmp(e->bundle, gAxonSelectedBundle) == 0;
-        if ((!wantsVisible && !e->hiddenByAxon) || (wantsVisible && e->hiddenByAxon)) {
-            pendingOps++;
-        }
-    }
-    const int kAxonAsyncOpsBudget = 25;
-    bool useAsync = pendingOps > 0 && pendingOps <= kAxonAsyncOpsBudget;
-
+    // Chunked async: fire kAxonAsyncBatchSize ops, then sync-flush via
+    // _notificationListDidChangeContent to drain. Historical comment:
+    // 76-op bursts panicked the kernel, so 20 per batch leaves headroom.
+    // Async is ~3x faster than sync per call (no settle wait), and the
+    // periodic flush keeps SB's view layer caught up with the data model.
+    const int kAxonAsyncBatchSize = 20;
     int removed = 0;
     int inserted = 0;
+    int restoreSkipped = 0;
+    int batchSinceFlush = 0;
+    int flushes = 0;
+
     for (int i = 0; i < gAxonRequestCount; i++) {
         AXNRequestEntry *e = &gAxonRequests[i];
         if (!r_is_objc_ptr(e->request) || !e->bundle[0]) continue;
 
-        // Match upstream Axon: with no selection, list is empty (showByDefault=0).
-        // User must tap an icon to see that bundle's notifs.
-        bool wantsVisible = filterEnabled &&
-                            strcmp(e->bundle, gAxonSelectedBundle) == 0;
+        bool wantsVisible = !filterEnabled || strcmp(e->bundle, gAxonSelectedBundle) == 0;
+        bool fired = false;
 
         if (!wantsVisible && !e->hiddenByAxon) {
-            AXN_TAG("removeNotificationRequest req=0x%llx bundle=%s async=%d",
-                    (unsigned long long)e->request, e->bundle, useAsync);
-            if (useAsync) {
-                r_msg2_main_async(clvc, "removeNotificationRequest:", e->request, 0, 0, 0);
-            } else {
-                r_msg2_main(clvc, "removeNotificationRequest:", e->request, 0, 0, 0);
-            }
+            r_msg2_main_async(clvc, "removeNotificationRequest:", e->request, 0, 0, 0);
             e->hiddenByAxon = true;
             e->hiddenCell = 0;
             removed++;
+            fired = true;
         } else if (wantsVisible && e->hiddenByAxon) {
-            AXN_TAG("insertNotificationRequest req=0x%llx bundle=%s async=%d",
-                    (unsigned long long)e->request, e->bundle, useAsync);
-            if (useAsync) {
-                r_msg2_main_async(clvc, "insertNotificationRequest:", e->request, 0, 0, 0);
-            } else {
-                r_msg2_main(clvc, "insertNotificationRequest:", e->request, 0, 0, 0);
+            if (!canRestore) {
+                restoreSkipped++;
+                continue;
             }
+            r_msg2_main_async(model, "_insertNotificationRequest:", e->request, 0, 0, 0);
             e->hiddenByAxon = false;
-            e->hiddenCell = 0;
             inserted++;
+            fired = true;
         }
+
+        if (fired && ++batchSinceFlush >= kAxonAsyncBatchSize) {
+            if (gAxonModelCanNotifyContentChange && r_is_objc_ptr(model)) {
+                r_msg2_main(model, "_notificationListDidChangeContent", 0, 0, 0, 0);
+                flushes++;
+            }
+            batchSinceFlush = 0;
+        }
+    }
+
+    // Final drain so any partial batch is flushed.
+    if ((removed > 0 || inserted > 0) && gAxonModelCanNotifyContentChange &&
+        r_is_objc_ptr(model) && batchSinceFlush > 0) {
+        r_msg2_main(model, "_notificationListDidChangeContent", 0, 0, 0, 0);
+        flushes++;
     }
 
     if (selectionChanged) {
         snprintf(gAxonLastAppliedFilter, sizeof(gAxonLastAppliedFilter), "%s", gAxonSelectedBundle);
     }
 
-    if (selectionChanged || removed || inserted) {
-        printf("[AXONLITE] filter selected=%s removed=%d inserted=%d tracked=%d\n",
+    if (selectionChanged || removed || inserted || restoreSkipped) {
+        printf("[AXONLITE] filter selected=%s removed=%d inserted=%d skipped=%d flushes=%d tracked=%d\n",
                gAxonSelectedBundle[0] ? gAxonSelectedBundle : "All",
-               removed, inserted, gAxonRequestCount);
+               removed, inserted, restoreSkipped, flushes, gAxonRequestCount);
         gAxonFilterLoggedOnce = true;
     }
+
+    if (gAxonSpinnerHoldTicks > 0) {
+        gAxonSpinnerHoldTicks--;
+        if (gAxonSpinnerHoldTicks == 0) axn_show_spinner(false);
+    }
+
+    // Visual ground-truth probe: after the filter pass, read back what SB
+    // actually has in its visible-cell cache and the segmented control's
+    // selected index. listCache.count drops when removeNotificationRequest:
+    // actually tore down cells; it rises when _insertNotificationRequest:
+    // restored them. segIdx is the raw value SB sees on the strip (caught
+    // here even if our polling missed the change).
+    int64_t cellsCount = -1;
+    uint64_t cells = r_is_objc_ptr(model) ? axn_cells_for_requests_from_model(model) : 0;
+    if (r_is_objc_ptr(cells)) {
+        cellsCount = (int64_t)axn_msg0_cached(cells, AXNSelCount, "count");
+    }
+    int64_t segIdx = -1;
+    if (r_is_objc_ptr(gAxonControl) && gAxonControlCanSelect) {
+        segIdx = (int64_t)r_msg2_main(gAxonControl, "selectedSegmentIndex", 0, 0, 0, 0);
+    }
+    int hiddenByAxonCount = 0;
+    for (int i = 0; i < gAxonRequestCount; i++) {
+        if (gAxonRequests[i].hiddenByAxon) hiddenByAxonCount++;
+    }
+    printf("[AXONLITE] visual tick=%llu listCache=%lld segIdx=%lld selectedBundle=%s hiddenByAxon=%d tracked=%d\n",
+           (unsigned long long)tick,
+           (long long)cellsCount,
+           (long long)segIdx,
+           gAxonSelectedBundle[0] ? gAxonSelectedBundle : "All",
+           hiddenByAxonCount,
+           gAxonRequestCount);
 
     r_settle_us(axonOldSettle);
 }
@@ -2968,35 +3180,25 @@ bool axonlite_stop_in_session(void)
         if (r_is_objc_ptr(cached)) clvc = cached;
     }
 
-    int toggled = 0;
-    int reinserted = 0;
-    int shown = 0;
+    int restored = 0;
+    int restoreSkipped = 0;
     gAxonSelectedBundle[0] = '\0';
 
-    if (r_is_objc_ptr(clvc) && gAxonClvcCanToggleFilter) {
-        for (int i = 0; i < gAxonFilteredCount; i++) {
-            uint64_t sectionId = axn_section_id_for_bundle(gAxonFilteredBundles[i]);
-            if (r_is_objc_ptr(sectionId)) {
-                r_msg2_main(clvc, "toggleFilteringForSectionIdentifier:shouldFilter:",
-                            sectionId, 0, 0, 0);
-                toggled++;
-            }
+    uint64_t model = r_is_objc_ptr(gAxonListModel) ? gAxonListModel : 0;
+    bool canRestore = r_is_objc_ptr(model) && gAxonModelCanPrivateInsert;
+    for (int i = 0; i < gAxonRequestCount; i++) {
+        AXNRequestEntry *entry = &gAxonRequests[i];
+        if (!entry->hiddenByAxon) continue;
+        if (!canRestore || !r_is_objc_ptr(entry->request)) {
+            restoreSkipped++;
+            continue;
         }
+        r_msg2_main(model, "_insertNotificationRequest:", entry->request, 0, 0, 0);
+        entry->hiddenByAxon = false;
+        restored++;
     }
-    if (r_is_objc_ptr(clvc)) {
-        for (int i = 0; i < gAxonRequestCount; i++) {
-            AXNRequestEntry *entry = &gAxonRequests[i];
-            if (!entry->hiddenByAxon) continue;
-            if (gAxonClvcCanInsert && r_is_objc_ptr(entry->request)) {
-                r_msg2_main(clvc, "insertNotificationRequest:", entry->request, 0, 0, 0);
-                entry->hiddenByAxon = false;
-                entry->hiddenCell = 0;
-                reinserted++;
-            } else {
-                axn_show_request(clvc, entry);
-                shown++;
-            }
-        }
+    if (restored > 0 && gAxonModelCanNotifyContentChange) {
+        r_msg2_main(model, "_notificationListDidChangeContent", 0, 0, 0, 0);
     }
 
     if (r_is_objc_ptr(gAxonDisplayStyleAssertion)) {
@@ -3005,7 +3207,12 @@ bool axonlite_stop_in_session(void)
         gAxonDisplayStyleAssertion = 0;
     }
 
-    if (r_is_objc_ptr(gAxonWindow)) r_msg2_main(gAxonWindow, "removeFromSuperview", 0, 0, 0, 0);
+    if (r_is_objc_ptr(gAxonWindow)) {
+        r_msg2_main(gAxonWindow, "setHidden:", 1, 0, 0, 0);
+        r_msg2_main(gAxonWindow, "removeFromSuperview", 0, 0, 0, 0);
+        axn_release_remote_obj(gAxonWindow);
+        gAxonWindow = 0;
+    }
     for (int i = 0; i < gAxonRequestCount; i++) {
         if (gAxonRequests[i].retained) axn_release_remote_obj(gAxonRequests[i].request);
     }
@@ -3043,12 +3250,18 @@ bool axonlite_stop_in_session(void)
     axn_section_id_cache_clear();
     gAxonCLVC = 0;
     gAxonCombined = 0;
+    gAxonCoverSheetWindow = 0;
     gAxonControllerProbedOnce = false;
     gAxonClvcCanRemove = false;
     gAxonClvcCanInsert = false;
     gAxonClvcCanToggleFilter = false;
     gAxonClvcCanReveal = false;
     gAxonClvcCanListView = false;
+    gAxonModelProbed = false;
+    gAxonModelProbedPtr = 0;
+    gAxonModelCanToggleFilter = false;
+    gAxonModelCanPrivateInsert = false;
+    gAxonModelCanNotifyContentChange = false;
     gAxonCombinedCanForceReveal = false;
     gAxonCombinedCanOverrideStyle = false;
     gAxonCombinedProbedOnce = false;
@@ -3057,12 +3270,14 @@ bool axonlite_stop_in_session(void)
     gAxonWindow = 0;
     gAxonHostView = 0;
     gAxonBadgeView = 0;
+    gAxonSpinner = 0;
+    gAxonSpinnerHoldTicks = 0;
     gAxonDisplayedCount = 0;
     gAxonSegmentSignature[0] = '\0';
     gAxonBadgeSignature[0] = '\0';
     gAxonLoggedControllerMiss = false;
-    printf("[AXONLITE] stopped clvc=0x%llx toggled=%d reinserted=%d shown=%d\n",
-           clvc, toggled, reinserted, shown);
+    printf("[AXONLITE] stopped clvc=0x%llx restored=%d skipped=%d\n",
+           clvc, restored, restoreSkipped);
     r_settle_us(oldSettleUS);
     return true;
 }
@@ -3085,10 +3300,13 @@ void axonlite_forget_remote_state(void)
     gAxonIconCacheCount = 0;
     gAxonCLVC = 0;
     gAxonCombined = 0;
+    gAxonCoverSheetWindow = 0;
     gAxonWindow = 0;
     gAxonHostView = 0;
     gAxonControl = 0;
     gAxonBadgeView = 0;
+    gAxonSpinner = 0;
+    gAxonSpinnerHoldTicks = 0;
     gAxonModelOwnerCLVC = 0;
     gAxonListModel = 0;
     gAxonListCache = 0;
@@ -3105,6 +3323,11 @@ void axonlite_forget_remote_state(void)
     gAxonClvcCanToggleFilter = false;
     gAxonClvcCanReveal = false;
     gAxonClvcCanListView = false;
+    gAxonModelProbed = false;
+    gAxonModelProbedPtr = 0;
+    gAxonModelCanToggleFilter = false;
+    gAxonModelCanPrivateInsert = false;
+    gAxonModelCanNotifyContentChange = false;
     gAxonCombinedCanForceReveal = false;
     gAxonCombinedCanOverrideStyle = false;
     gAxonCombinedProbedOnce = false;
@@ -3136,6 +3359,12 @@ void axonlite_forget_remote_state(void)
     gAxonCSMainPageClassTried = false;
     gAxonBadgedIconViewClassTried = false;
     gAxonWarmupLogBudget = 24;
+    gAxonTick = 0;
 
     printf("[AXONLITE] forgot remote overlay/filter state\n");
+}
+
+bool axonlite_initial_cache_ready(void)
+{
+    return gAxonTick >= 2;
 }
