@@ -37,6 +37,8 @@ static int         gThemerCacheCount = 0;
 static int         gThemerLogBudget  = 48;
 static bool        gThemerModelProbeLogged = false;
 static bool        gThemerIconServicesProbeLogged = false;
+static int         gThemerHostIOSMajor = -1;
+static bool        gThemerVisiblePolicyLogged = false;
 
 // -1 unprobed, 0 nothing works, 1/2/3/4 chosen rung.
 static int  gThemerRung              = -1;
@@ -48,6 +50,14 @@ static uint64_t themer_now_us(void)
     struct timespec ts = {0};
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ((uint64_t)ts.tv_sec * 1000000ULL) + ((uint64_t)ts.tv_nsec / 1000ULL);
+}
+
+static int themer_host_ios_major(void)
+{
+    if (gThemerHostIOSMajor >= 0) return gThemerHostIOSMajor;
+    NSOperatingSystemVersion v = [[NSProcessInfo processInfo] operatingSystemVersion];
+    gThemerHostIOSMajor = (int)v.majorVersion;
+    return gThemerHostIOSMajor;
 }
 
 static uint64_t themer_lookup_cached(const char *bundle)
@@ -600,7 +610,12 @@ static bool themer_prefers_view_level_overlay(const char *bundle)
 static bool themer_needs_visible_push(const char *bundle)
 {
     (void)bundle;
-    return false;
+    // iOS 26's model/image-cache path persists without repainting visible
+    // SBIconViews. iOS 18 reports the model graft as successful, but SpringBoard
+    // keeps rendering the already-mounted view unless we also hit the legacy
+    // visible setter path.
+    int major = themer_host_ios_major();
+    return major > 0 && major < 26;
 }
 
 static bool themer_clear_overlay_on_object(uint64_t obj, uint64_t key)
@@ -1149,20 +1164,30 @@ static int themer_probe_rung(uint64_t iconView)
 
     char iivCls[96] = {0};
     if (r_is_objc_ptr(iiv)) themer_read_class_name(iiv, iivCls, sizeof(iivCls));
+    bool legacyVisible = themer_needs_visible_push(NULL);
     printf("[THEMER] probe iconView=0x%llx setOverrideImage:=%d setIconImage:=%d "
            "_setIconImage:=%d _iconImageView=0x%llx (%s) "
            "setImage:=%d updateContents:=%d setDisplayedImage:=%d "
-           "update:=%d updateIV:=%d\n",
+           "update:=%d updateIV:=%d legacy=%d\n",
            (unsigned long long)iconView, r1, r2, r3,
            (unsigned long long)iiv, iivCls,
            r4, gThemerInnerCanUpdateContents, gThemerInnerCanSetDisplayed,
-           gThemerHasUpdateAfter, gThemerHasUpdateImageView);
+           gThemerHasUpdateAfter, gThemerHasUpdateImageView,
+           legacyVisible);
 
-    if (r1)      gThemerRung = 1;
-    else if (r2) gThemerRung = 2;
-    else if (r3) gThemerRung = 3;
-    else if (r4) gThemerRung = 4;
-    else         gThemerRung = 0;
+    if (legacyVisible) {
+        if (r2)      gThemerRung = 2;
+        else if (r3) gThemerRung = 3;
+        else if (r4) gThemerRung = 4;
+        else if (r1) gThemerRung = 1;
+        else         gThemerRung = 0;
+    } else {
+        if (r1)      gThemerRung = 1;
+        else if (r2) gThemerRung = 2;
+        else if (r3) gThemerRung = 3;
+        else if (r4) gThemerRung = 4;
+        else         gThemerRung = 0;
+    }
 
     return gThemerRung;
 }
@@ -1891,6 +1916,12 @@ bool themer_apply_data_in_session(NSDictionary<NSString *, NSData *> *imageDataB
     }
     printf("[THEMER] apply data entries=%lu cacheCarried=%d\n",
            (unsigned long)imageDataByBundle.count, gThemerCacheCount);
+    if (!gThemerVisiblePolicyLogged) {
+        gThemerVisiblePolicyLogged = true;
+        printf("[THEMER] visible push policy iosMajor=%d legacyVisible=%d\n",
+               themer_host_ios_major(),
+               themer_needs_visible_push(NULL));
+    }
 
     // Drop the per-msgSend settle for the duration of the apply. The stable
     // RemoteCall trampoline already serializes the calls; sleeping before every
@@ -1990,6 +2021,7 @@ bool themer_stop_in_session(void)
     gThemerLogBudget = 48;
     gThemerModelProbeLogged = false;
     gThemerIconServicesProbeLogged = false;
+    gThemerVisiblePolicyLogged = false;
     printf("[THEMER] stop released=%d\n", released);
     return true;
 }
@@ -2009,4 +2041,5 @@ void themer_forget_remote_state(void)
     gThemerLogBudget = 48;
     gThemerModelProbeLogged = false;
     gThemerIconServicesProbeLogged = false;
+    gThemerVisiblePolicyLogged = false;
 }
