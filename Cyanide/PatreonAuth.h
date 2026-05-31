@@ -23,8 +23,9 @@ NSURL *cyanide_patreon_join_url(void);
 BOOL cyanide_patreon_is_linked(void);
 
 // YES iff the linked account is currently an active patron pledging > 0
-// cents to the Cyanide campaign. Reads cached value — call
-// cyanide_patreon_refresh() to revalidate against the Patreon API.
+// cents to the Cyanide campaign, or the Worker signed it as comped access.
+// Reads cached value — call cyanide_patreon_refresh() to revalidate against
+// the Patreon API.
 BOOL cyanide_is_patron(void);
 
 // YES iff the linked account is the campaign creator (tier == "Creator").

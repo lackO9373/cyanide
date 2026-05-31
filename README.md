@@ -27,7 +27,10 @@ Open this page on your iPhone/iPad and tap one of the buttons below.
 
 ## Patreon
 
-Early access to experimental tweaks (Dynamic Stage Lite, Signal Readouts, TypeBanner, and future work) is available to [Patreon supporters](https://www.patreon.com/zeroxjf) at the Member tier and above.
+Early access to experimental tweaks (Dynamic Stage Lite, Signal Readouts,
+TypeBanner, Location Simulator, Call Recording Sound, and future work) is
+available to [Patreon supporters](https://www.patreon.com/zeroxjf) at the
+Member tier and above.
 
 ## Tweaks
 
@@ -106,6 +109,17 @@ Ported from [`kolbicz/DarkSword-Tweaks`](https://github.com/kolbicz/DarkSword-Tw
   RemoteCall/CLSimulationManager GPS spoofer prototype, and `ezzuldinSt`'s
   LSpoof provided the app-side spoofing, picker, bookmarks, and route-simulation
   reference.
+- **Call Recording Sound**: replaces the CallServices
+  `StartDisclosureWithTone` and `StopDisclosure` audio files with Cyanide's
+  bundled silent payloads, with separate Silence and Restore actions. Cyanide
+  backs up the first originals into its app container before replacement, but
+  this is still a persistent system-file edit under
+  `/var/mobile/Library/CallServices/Greetings/default`. Disclosure sounds may be
+  legally required where you live; you are responsible for your use and should
+  restore the originals before removing Cyanide if you want Cyanide's backups
+  written back. Credits: `YangJiiii` (`@duongduong0908`) for the EnsWilde and
+  Disable Call Recording BookRestore reference tools, and `@Little_34306` as
+  credited by the original projects for the Disable Call Recording concept.
 
 ## Supported Targets
 
@@ -147,6 +161,10 @@ iOS/iPadOS 18.7.2 and 26.1. Later builds are outside this kernel exploit window.
 - `ezzuldinSt`: LSpoof app-side `CLLocationManager` spoofing, picker,
   bookmarks, and route-simulation reference used while shaping Location
   Simulator.
+- `YangJiiii` (`@duongduong0908`): EnsWilde and Disable Call Recording
+  BookRestore reference tools used while shaping Call Recording Sound.
+- `@Little_34306`: credited by the original call-recording projects for the
+  Disable Call Recording concept.
 - [`rpetrich`](https://github.com/rpetrich): Powercuff.
 - [`tomt000`](https://github.com/tomt000): [Dynamic Stage](https://havoc.app/package/dynamicstage) — the original Stage Manager-for-iPhone tweak whose split-view + scene-hosting design Dynamic Stage Lite re-implements over RemoteCall.
 

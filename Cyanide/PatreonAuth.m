@@ -31,6 +31,8 @@ static NSString * const kDefaultsTierTitle   = @"CyanidePatreonTierTitle";
 static NSString * const kDefaultsPledgeCents = @"CyanidePatreonPledgeCents";
 static NSString * const kDefaultsLastRefresh = @"CyanidePatreonLastRefresh";
 
+static NSString * const kPatreonCompedUsername = @"AppleAttack";
+
 NSString * const kCyanidePatreonStatusDidChangeNotification = @"CyanidePatreonStatusDidChangeNotification";
 
 static NSString * const kPatreonJoinURL = @"https://www.patreon.com/zeroxjf";
@@ -179,6 +181,25 @@ static NSDictionary *_Nullable current_payload(void)
     return p;
 }
 
+static BOOL patreon_string_matches_comped_username(NSString *_Nullable value)
+{
+    if (![value isKindOfClass:[NSString class]]) return NO;
+    NSString *trimmed = [value stringByTrimmingCharactersInSet:
+        [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return [trimmed caseInsensitiveCompare:kPatreonCompedUsername] == NSOrderedSame;
+}
+
+static BOOL patreon_payload_bool(NSDictionary *payload, NSString *key)
+{
+    id value = payload[key];
+    return [value isKindOfClass:[NSNumber class]] && [value boolValue];
+}
+
+static BOOL patreon_payload_is_comped_username(NSDictionary *payload)
+{
+    return patreon_string_matches_comped_username(payload[@"username"]);
+}
+
 #pragma mark - Public accessors
 
 BOOL cyanide_patreon_is_linked(void)
@@ -191,6 +212,8 @@ BOOL cyanide_is_patron(void)
 {
     NSDictionary *p = current_payload();
     if (!p) return NO;
+    if (patreon_payload_bool(p, @"is_comped")) return YES;
+    if (patreon_payload_is_comped_username(p)) return YES;
     id v = p[@"is_patron"];
     return [v isKindOfClass:[NSNumber class]] && [v boolValue];
 }
