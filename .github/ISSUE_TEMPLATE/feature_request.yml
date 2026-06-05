@@ -1,0 +1,94 @@
+name: Feature Request
+description: Suggest a Cyanide feature, tweak, or workflow improvement.
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for ideas that should become trackable work. For quick questions or rough brainstorming, the Signal group is usually better.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or goal
+      description: What are you trying to do, or what feels missing?
+      placeholder: "I want a faster way to restore all SpringBoard tweaks after a reboot..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: Proposed feature
+      description: Describe the behavior, UI, or tweak you want.
+      placeholder: "Add a one-tap profile that reapplies my selected tweaks in order..."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where would this fit?
+      options:
+        - Installer
+        - Settings
+        - Log tab or diagnostics
+        - Kernel exploit or run flow
+        - Status bar tweak
+        - Home screen or SpringBoard tweak
+        - Theming
+        - Performance or power
+        - Compatibility or device support
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: target-versions
+    attributes:
+      label: Target devices or iOS versions
+      description: Leave blank if the idea is not device/version-specific.
+      placeholder: "iOS 18.x, iOS 26.0.x, A16+, iPad only, etc."
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or references
+      description: Link similar tweaks, screenshots, mockups, research notes, or workarounds.
+      placeholder: "Similar to ..., but exposed inside Cyanide Settings."
+
+  - type: dropdown
+    id: impact
+    attributes:
+      label: Impact
+      options:
+        - Nice to have
+        - Would make testing easier
+        - Would fix a common pain point
+        - Blocks my use case
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Can you help with it?
+      options:
+        - label: I can test builds.
+        - label: I can provide logs, screenshots, or a screen recording.
+        - label: I can help implement or submit a PR.
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing open and closed issues.
+          required: true
+        - label: This request is about Cyanide, not general iOS support.
+          required: true
+        - label: I described the problem and the proposed behavior.
+          required: true

@@ -1,0 +1,130 @@
+name: Bug Report
+description: Report something broken in Cyanide.
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping test Cyanide. Clear device details and repeatable steps make bugs much easier to fix.
+
+  - type: input
+    id: cyanide-version
+    attributes:
+      label: Cyanide version
+      description: Use the version shown in the app or on the GitHub Release page.
+      placeholder: "v1.2.5"
+    validations:
+      required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      description: Include the exact model if you know it.
+      placeholder: "iPhone 15 Pro, iPad Pro 11-inch M4, etc."
+    validations:
+      required: true
+
+  - type: input
+    id: chip
+    attributes:
+      label: Chip
+      placeholder: "A16, A17 Pro, M4, etc."
+    validations:
+      required: true
+
+  - type: input
+    id: ios-version
+    attributes:
+      label: iOS or iPadOS version
+      description: Include the build number if available.
+      placeholder: "18.7.1 (22H31), 26.0.1, etc."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: Install method
+      options:
+        - AltStore
+        - TrollStore
+        - Sideloadly
+        - Other sideloading tool
+        - Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: affected-area
+    attributes:
+      label: What area is affected?
+      options:
+        - App launch or UI
+        - Kernel exploit or sandbox escape
+        - Installer package flow
+        - Settings
+        - SpringBoard tweak apply or cleanup
+        - Specific tweak
+        - Update check or release install
+        - Logs or diagnostics
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the bug in plain language.
+      placeholder: "Cyanide says the tweak applied, but nothing changes after respring..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Tell us exactly what you tapped or changed before the bug appeared.
+      placeholder: |
+        1. Open Cyanide
+        2. Install/enable ...
+        3. Tap Apply Tweaks
+        4. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+      placeholder: "The tweak should apply and stay enabled after SpringBoard returns."
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs, screenshots, or crash details
+      description: Paste relevant Cyanide log output, panic text, screenshots, or screen recordings.
+      render: text
+
+  - type: input
+    id: regression
+    attributes:
+      label: Did this work in an older Cyanide version?
+      placeholder: "Yes, v1.2.4 worked / No / Not sure"
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing open and closed issues.
+          required: true
+        - label: I tested with the latest Cyanide release available to me.
+          required: true
+        - label: I included device, chip, iOS version, and steps to reproduce.
+          required: true

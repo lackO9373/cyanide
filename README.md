@@ -25,6 +25,13 @@ Open this page on your iPhone/iPad and tap one of the buttons below.
   </a>
 </p>
 
+## Feedback
+
+- [Report a bug](https://github.com/zeroxjf/cyanide/issues/new?template=bug_report.yml)
+- [Request a feature](https://github.com/zeroxjf/cyanide/issues/new?template=feature_request.yml)
+- [Join the Signal group](https://t.co/afPR3U04G1) for setup help, support,
+  test notes, and rough ideas before they become issues.
+
 ## Patreon
 
 Early access to experimental tweaks (Dynamic Stage Lite, Signal Readouts,
